@@ -1,0 +1,6 @@
+.venv/
+venv/
+__pycache__/
+.streamlit/
+chroma_nentsu_r7/
+.pytest_cache/

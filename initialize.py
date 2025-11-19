@@ -1,7 +1,9 @@
+# initialize.py
 """RAG 用ベクトルストアの初期化処理"""
 
 import os
 import streamlit as st
+
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
@@ -11,61 +13,59 @@ import constants as ct
 
 
 def _load_guide_documents():
-    """年末調整の手引き PDF および関連資料からドキュメントを読み込む。"""
+    """data フォルダ内の PDF（4種）を読み込む"""
 
-    # メインとなる年末調整の手引き（必須）
-    main_pdf_path = ct.NENTSU_GUIDE_PDF
-
-    # 追加資料：令和7年度税制改正Q&A など（存在すれば読み込む）
-    # data/ 配下に "nentsu_R7_kaisei.pdf" が置いてある前提
-    extra_pdf_paths = [
-        "data/nentsu_R7_kaisei.pdf",
+    pdf_paths = [
+        ct.NENTSU_GUIDE_PDF,    # 年末調整の手引き
+        ct.NENTSU_QA_PDF,       # 年末調整Q&A（令和7年版）
+        ct.NENTSU_KAISEI_PDF,   # 改正のポイント
+        ct.TAISYOSYA_PDF,       # 年末調整の対象者（タックスアンサー2665）
     ]
 
-    if not os.path.exists(main_pdf_path):
-        raise FileNotFoundError(
-            f"PDF が見つかりませんでした。'{main_pdf_path}' にファイルを配置してください。"
-        )
-
-    docs = []
-
-    # メインPDF読み込み
-    main_loader = PyMuPDFLoader(main_pdf_path)
-    main_docs = main_loader.load()
-    for d in main_docs:
-        d.metadata.setdefault("source", os.path.basename(main_pdf_path))
-    docs.extend(main_docs)
-
-    # 追加PDFがあれば読み込み
-    for path in extra_pdf_paths:
+    documents = []
+    for path in pdf_paths:
         if not os.path.exists(path):
-            # サブ資料がない場合は警告だけ出してスキップ
-            st.warning(
-                f"追加資料 '{path}' が見つからなかったため、このPDFは検索対象に含まれません。"
-            )
+            print(f"[WARN] PDF が見つかりません: {path}")
             continue
 
         loader = PyMuPDFLoader(path)
-        extra_docs = loader.load()
-        for d in extra_docs:
-            d.metadata.setdefault("source", os.path.basename(path))
-        docs.extend(extra_docs)
+        docs = loader.load()
 
-    return docs
+        # どの資料・何ページかをメタデータとして保持
+        for d in docs:
+            src = os.path.basename(path)
+            page = d.metadata.get("page")
+
+            d.metadata["source"] = src
+            if page is not None:
+                d.metadata["page"] = int(page) + 1  # 1 始まりに統一
+
+        documents.extend(docs)
+
+    return documents
 
 
-def _build_vectorstore():
-    """PDF からベクトルストアを新規構築する。"""
-    docs = _load_guide_documents()
+def _split_documents(documents):
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=ct.CHUNK_SIZE,
         chunk_overlap=ct.CHUNK_OVERLAP,
         separators=["\n\n", "\n", "。", "、", " "],
     )
-    splits = splitter.split_documents(docs)
+    return splitter.split_documents(documents)
+
+
+def _build_vectorstore():
+    docs = _load_guide_documents()
+    if not docs:
+        raise RuntimeError(
+            "参照用PDFが1つも読み込めませんでした。data フォルダを確認してください。"
+        )
+
+    chunks = _split_documents(docs)
     embeddings = OpenAIEmbeddings(model=ct.EMBEDDING_MODEL)
+
     vs = Chroma.from_documents(
-        splits,
+        documents=chunks,
         embedding=embeddings,
         persist_directory=ct.CHROMA_DIR,
     )
@@ -73,22 +73,22 @@ def _build_vectorstore():
 
 
 def get_vectorstore():
-    """既存のベクトルストアを読み込む。なければ新規構築する。"""
-    embeddings = OpenAIEmbeddings(model=ct.EMBEDDING_MODEL)
-    if os.path.exists(ct.CHROMA_DIR):
+    if os.path.exists(ct.CHROMA_DIR) and os.listdir(ct.CHROMA_DIR):
+        embeddings = OpenAIEmbeddings(model=ct.EMBEDDING_MODEL)
         vs = Chroma(
             embedding_function=embeddings,
             persist_directory=ct.CHROMA_DIR,
         )
     else:
         vs = _build_vectorstore()
+
     return vs
 
 
 def setup_retriever():
-    """Streamlit セッション上に retriever をセットする。"""
     if "retriever" in st.session_state:
         return
+
     vs = get_vectorstore()
     retriever = vs.as_retriever(search_kwargs={"k": ct.TOP_K})
     st.session_state["retriever"] = retriever
